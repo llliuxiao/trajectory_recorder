@@ -4,7 +4,6 @@ import argparse
 import json
 import math
 import os
-import subprocess
 import sys
 import threading
 import time
@@ -27,6 +26,7 @@ from tf.transformations import euler_from_quaternion
 import message_filters
 from gazebo_msgs.srv import SetModelState, GetModelState
 from gazebo_msgs.msg import ModelState
+from nav_msgs.msg import OccupancyGrid
 
 pi_2 = math.pi / 2
 
@@ -50,6 +50,7 @@ class TrajectoryRecorder:
         self.laser_dataset_pool = []
         self.global_path_pool = []
         self.local_path_pool = []
+        self.local_map_pool = []
         self.dataset_info = {}
 
         # write threading
@@ -62,8 +63,8 @@ class TrajectoryRecorder:
         self.cmd_vel_sub = message_filters.Subscriber("/cmd_vel_stamped", TwistStamped)
         self.path_sub = message_filters.Subscriber("/move_base/GlobalPlanner/robot_frame_plan", Path)
         self.local_path_sub = message_filters.Subscriber("/move_base/TebLocalPlannerROS/local_plan", Path)
-        subs = [self.scan_sub, self.cmd_vel_sub, self.path_sub, self.local_path_sub]
-        # self.msg_filter = message_filters.TimeSynchronizer(subs, 2000)
+        self.local_map_sub = message_filters.Subscriber("/move_base/local_costmap/costmap", OccupancyGrid)
+        subs = [self.scan_sub, self.cmd_vel_sub, self.path_sub, self.local_path_sub, self.local_map_sub]
         self.msg_filter = message_filters.ApproximateTimeSynchronizer(subs, queue_size=1000, slop=0.01)
         self.msg_filter.registerCallback(self._sensor_callback)
 
@@ -106,20 +107,25 @@ class TrajectoryRecorder:
             laser_dataset = copy.deepcopy(self.laser_dataset_pool)
             global_plan_dataset = copy.deepcopy(self.global_path_pool)
             local_plan_dataset = copy.deepcopy(self.local_path_pool)
+            local_map_dataset = copy.deepcopy(self.local_map_pool)
             self.laser_dataset_pool.clear()
             self.global_path_pool.clear()
             self.local_path_pool.clear()
+            self.local_map_pool.clear()
             self.dataset_condition_lock.release()
             for i in range(len(laser_dataset)):
                 laser, laser_path = laser_dataset[i]
                 global_plan, global_plan_path = global_plan_dataset[i]
                 local_plan, local_plan_path = local_plan_dataset[i]
+                local_map, local_map_path = local_map_dataset[i]
                 np.save(laser_path, np.array(laser))
+                np.save(local_map_path, np.array(local_map.data))
                 self._save_plan(global_plan, global_plan_path)
                 self._save_plan(local_plan, local_plan_path)
             del laser_dataset
             del global_plan_dataset
             del local_plan_dataset
+            del local_map_dataset
 
     def _save_plan(self, plan: Path, path: str):
         poses = []
@@ -132,7 +138,8 @@ class TrajectoryRecorder:
             ])
         np.save(path, np.array(poses))
 
-    def _sensor_callback(self, scan_msg: LaserScan, cmd_vel_msg: TwistStamped, path_msg: Path, local_path_msg: Path):
+    def _sensor_callback(self, scan_msg: LaserScan, cmd_vel_msg: TwistStamped,
+                         path_msg: Path, local_path_msg: Path, local_map_msg: OccupancyGrid):
         self.counter += 1
         laser_path = os.path.join(f"{self.dataset_root_path}/trajectory{self.trajectory_num}",
                                   f"laser{self.step_num}.npy")
@@ -142,6 +149,9 @@ class TrajectoryRecorder:
         local_plan_path = os.path.join(
             f"{self.dataset_root_path}/trajectory{self.trajectory_num}",
             f"local_plan{self.step_num}.npy")
+        local_map_path = os.path.join(
+            f"{self.dataset_root_path}/trajectory{self.trajectory_num}",
+            f"local_map{self.step_num}.npy")
 
         robot_state = self.state_client("jackal", "world")
 
@@ -153,13 +163,16 @@ class TrajectoryRecorder:
             "cmd_vel_linear": cmd_vel_msg.twist.linear.x,
             "cmd_vel_angular": cmd_vel_msg.twist.angular.z,
             "laser_path": laser_path,
-            "global_plan_path": global_plan_path
+            "global_plan_path": global_plan_path,
+            "local_plan_path": local_plan_path,
+            "local_map_path": local_map_path
         }
         self.dataset_info["data"].append(data)
         self.dataset_condition_lock.acquire()
         self.laser_dataset_pool.append((scan_msg.ranges, laser_path))
         self.global_path_pool.append((path_msg, global_plan_path))
         self.local_path_pool.append((local_path_msg, local_plan_path))
+        self.local_map_pool.append((local_map_msg, local_map_path))
         self.dataset_condition_lock.notify()
         self.dataset_condition_lock.release()
         self.step_num += 1
@@ -262,4 +275,3 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(args.root)
     main(args.root, args.num, args.map_yaml, args.map_pgm)
-

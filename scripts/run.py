@@ -1,13 +1,17 @@
 import subprocess
 import time
 
-import recorder
 import os
 import rospkg
+import logging
 
 max_test_times = 10
 
 dataset_root_path = f"/home/{os.getlogin()}/Downloads/dataset"
+
+os.environ["JACKAL_LASER"] = "1"
+os.environ["JACKAL_LASER_MODEL"] = "ust10"
+os.environ["JACKAL_LASER_OFFSET"] = "-0.065 0 0.01"
 
 if __name__ == "__main__":
     ros_package = rospkg.RosPack()
@@ -19,7 +23,7 @@ if __name__ == "__main__":
         world_file = os.path.join(base_path, f"test_data/world_files/world_{i}.world")
         for j in range(max_test_times):
             print("=" * 50)
-            print(f"World{i} try for the {j + 1} times")
+            logging.fatal(f"World{i} try for the {j + 1} times")
             print("=" * 50)
             # roscore
             core_process = subprocess.Popen(
@@ -55,7 +59,7 @@ if __name__ == "__main__":
             with open(f"{dataset_root_path}/trajectory{i}/result.txt", "r") as f:
                 result = eval(f.readline())
             if result is True:
-                print("record done! try next world!")
+                logging.fatal("record done! try next world!")
                 break
             else:
-                print("navigation overtime, try again")
+                logging.fatal("navigation overtime, try again")
