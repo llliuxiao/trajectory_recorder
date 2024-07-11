@@ -27,6 +27,9 @@ import message_filters
 from gazebo_msgs.srv import SetModelState, GetModelState
 from gazebo_msgs.msg import ModelState
 from nav_msgs.msg import OccupancyGrid
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
+from tf2_ros import TransformException
 
 pi_2 = math.pi / 2
 
@@ -58,10 +61,14 @@ class TrajectoryRecorder:
         self.dataset_condition_lock = threading.Condition()
         self.close_signal = False
 
+        # tf buffer
+        self.buffer = Buffer()
+        self.listener = TransformListener(self.buffer)
+
         # ros communication
         self.scan_sub = message_filters.Subscriber("/front/scan", LaserScan)
         self.cmd_vel_sub = message_filters.Subscriber("/cmd_vel_stamped", TwistStamped)
-        self.path_sub = message_filters.Subscriber("/move_base/GlobalPlanner/robot_frame_plan", Path)
+        self.path_sub = message_filters.Subscriber("/move_base/GlobalPlanner/plan", Path)
         self.local_path_sub = message_filters.Subscriber("/move_base/TebLocalPlannerROS/local_plan", Path)
         self.local_map_sub = message_filters.Subscriber("/move_base/local_costmap/costmap", OccupancyGrid)
         subs = [self.scan_sub, self.cmd_vel_sub, self.path_sub, self.local_path_sub, self.local_map_sub]
@@ -77,7 +84,6 @@ class TrajectoryRecorder:
         self.goal_pose = (-width / 2, 3.0 + height + 3.0)
 
         # flags
-        self.counter = 0
         self.result = False
         self.reset()
         self.dataset_thread.start()
@@ -100,7 +106,7 @@ class TrajectoryRecorder:
         return self.result
 
     def _writing_thread(self):
-        while not self.close_signal:
+        while not self.close_signal or not len(self.laser_dataset_pool) == 0:
             self.dataset_condition_lock.acquire()
             if len(self.laser_dataset_pool) == 0:
                 self.dataset_condition_lock.wait()
@@ -138,9 +144,25 @@ class TrajectoryRecorder:
             ])
         np.save(path, np.array(poses))
 
+    def get_robot_pose(self, source_frame: str, target_frame: str):
+        try:
+            pose = self.buffer.lookup_transform(target_frame=target_frame,
+                                                source_frame=source_frame,
+                                                time=rospy.Time(0))
+            pose_stamped = PoseStamped()
+            pose_stamped.pose.position.x = pose.transform.translation.x
+            pose_stamped.pose.position.y = pose.transform.translation.y
+            pose_stamped.pose.position.z = pose.transform.translation.z
+            pose_stamped.pose.orientation = pose.transform.rotation
+            pose_stamped.header = pose.header
+            return pose_stamped
+        except TransformException as ex:
+            rospy.logfatal(ex)
+            rospy.logfatal(f"Could not look transform from {source_frame} to {target_frame}")
+            return None
+
     def _sensor_callback(self, scan_msg: LaserScan, cmd_vel_msg: TwistStamped,
                          path_msg: Path, local_path_msg: Path, local_map_msg: OccupancyGrid):
-        self.counter += 1
         laser_path = os.path.join(f"{self.dataset_root_path}/trajectory{self.trajectory_num}",
                                   f"laser{self.step_num}.npy")
         global_plan_path = os.path.join(
@@ -153,13 +175,19 @@ class TrajectoryRecorder:
             f"{self.dataset_root_path}/trajectory{self.trajectory_num}",
             f"local_map{self.step_num}.npy")
 
-        robot_state = self.state_client("jackal", "world")
+        robot_state = self.get_robot_pose("base_link", "odom")
+        if robot_state is None:
+            return
+        target = path_msg.poses[-1]
 
         data = {
             "time": rospy.Time.now().to_sec(),
             "robot_x": robot_state.pose.position.x,
             "robot_y": robot_state.pose.position.y,
             "robot_yaw": self._get_yaw(robot_state.pose.orientation),
+            "target_x": target.pose.position.x,
+            "target_y": target.pose.position.y,
+            "target_yaw": self._get_yaw(target.pose.orientation),
             "cmd_vel_linear": cmd_vel_msg.twist.linear.x,
             "cmd_vel_angular": cmd_vel_msg.twist.angular.z,
             "laser_path": laser_path,
@@ -197,17 +225,14 @@ class TrajectoryRecorder:
         self._publish_goal_position(self.target_pose)
 
     def close(self):
-        info_file = os.path.join(f"{self.dataset_root_path}/trajectory{self.trajectory_num}", "dataset_info.json")
-        with open(info_file, "w") as f:
-            json.dump(self.dataset_info, fp=f)
         self.dataset_condition_lock.acquire()
         self.close_signal = True
         self.dataset_condition_lock.notify()
         self.dataset_condition_lock.release()
         self.dataset_thread.join()
-        print("=" * 50)
-        print(f"counter:{self.counter}")
-        print("=" * 50)
+        info_file = os.path.join(f"{self.dataset_root_path}/trajectory{self.trajectory_num}", "dataset_info.json")
+        with open(info_file, "w") as f:
+            json.dump(self.dataset_info, fp=f)
 
     def _publish_goal_position(self, pose: Pose):
         goal = MoveBaseGoal()
