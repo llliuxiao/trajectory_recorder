@@ -84,6 +84,7 @@ class TrajectoryRecorder:
         self.goal_pose = (-width / 2, 3.0 + height + 3.0)
 
         # flags
+        self.close_callback = False
         self.result = False
         self.reset()
         self.dataset_thread.start()
@@ -163,6 +164,8 @@ class TrajectoryRecorder:
 
     def _sensor_callback(self, scan_msg: LaserScan, cmd_vel_msg: TwistStamped,
                          path_msg: Path, local_path_msg: Path, local_map_msg: OccupancyGrid):
+        if self.close_callback:
+            return
         laser_path = os.path.join(f"{self.dataset_root_path}/trajectory{self.trajectory_num}",
                                   f"laser{self.step_num}.npy")
         global_plan_path = os.path.join(
@@ -225,6 +228,7 @@ class TrajectoryRecorder:
         self._publish_goal_position(self.target_pose)
 
     def close(self):
+        self.close_callback = True
         self.dataset_condition_lock.acquire()
         self.close_signal = True
         self.dataset_condition_lock.notify()
